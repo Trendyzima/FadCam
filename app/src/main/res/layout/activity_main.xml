@@ -12,8 +12,6 @@
     android:focusableInTouchMode="true"
     android:descendantFocusability="beforeDescendants">
 
-    <!-- Status bar scrim: height is dynamically set via ConstraintSet in MainActivity -->
-    <!-- For phones: height = statusBars.top, For TV/Wear: height = 0 -->
     <View
         android:id="@+id/status_bar_scrim"
         android:layout_width="match_parent"
@@ -37,7 +35,6 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Full bottom focus scrim around dock -->
     <View
         android:id="@+id/dock_focus_gradient_scrim"
         android:layout_width="match_parent"
@@ -82,23 +79,36 @@
             app:menu="@menu/bottom_nav_menu" />
     </FrameLayout>
 
-    <!-- ********************************************************** -->
-    <!-- *** ADD THIS FRAMELAYOUT FOR OVERLAY FRAGMENTS (like TrashFragment) *** -->
-    <!-- ********************************************************** -->
+    <com.fadcam.pip.ReactionPipLaunchButton
+        android:id="@+id/reaction_pip_button"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="88dp"
+        android:elevation="14dp"
+        android:minWidth="0dp"
+        android:minHeight="0dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:textSize="13sp"
+        android:textColor="@android:color/white"
+        android:backgroundTint="?attr/colorPrimary"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
     <FrameLayout
         android:id="@+id/overlay_fragment_container"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone"
-    android:clickable="true"
-    android:focusable="true"
-    android:focusableInTouchMode="true"
+        android:clickable="true"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
         android:background="?android:colorBackground"
         android:elevation="10dp"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
-    <!-- ********************************************************** -->
 
 </androidx.constraintlayout.widget.ConstraintLayout>
