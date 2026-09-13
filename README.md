@@ -469,7 +469,7 @@ We look forward to your contributions!
 <!-- FADCAM-APK-DOWNLOAD:START -->
 ## `>_` 📦 Latest Debug APK
 
-[![Download Latest APK](https://img.shields.io/badge/Download-Latest%20APK-brightgreen?logo=android)](https://github.com/Trendyzima/FadCam/actions/runs/34759622564)
+[![Download Latest APK](https://img.shields.io/badge/Download-Latest%20APK-brightgreen?logo=android)](https://github.com/Trendyzima/FadCam/actions/runs/34759927973)
 
 The latest successful production-room debug APK is published as the **FadCam-default-debug-apk** artifact on GitHub Actions. Open the build page above and download the APK from **Artifacts**.
 <!-- FADCAM-APK-DOWNLOAD:END -->
