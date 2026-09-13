@@ -11,8 +11,13 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -33,6 +38,7 @@ import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
@@ -44,25 +50,53 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Reaction/commentary workspace: source video in PIP + live camera + microphone. */
+/**
+ * Reaction/commentary workspace.
+ * Live camera is the final-video background; the selected source video is the
+ * movable/resizable PIP while the user talks into the microphone.
+ */
 public class CameraVideoPipActivity extends AppCompatActivity {
     private static final int PICK_VIDEO = 4001;
     private static final int REQUEST_CAMERA_AUDIO = 4002;
+    private static final int MIN_PIP_DP = 120;
+    private static final int MAX_PIP_DP = 520;
 
     private PreviewView cameraPreview;
     private PlayerView videoView;
+    private FrameLayout pipContainer;
+    private TextView status;
+    private TextView sourceVolumeLabel;
+    private TextView micVolumeLabel;
+    private ProgressBar exportProgress;
+    private Button commentaryButton;
+    private Button pauseButton;
+    private Button flipButton;
+    private SeekBar sourceVolume;
+    private SeekBar micVolume;
+
     private ExoPlayer player;
     private Uri sourceUri;
     private File sourceFile;
     private File cameraFile;
     private Recording recording;
     private VideoCapture<Recorder> videoCapture;
-    private Button commentaryButton;
-    private TextView status;
+    private CameraSelector currentCamera = CameraSelector.DEFAULT_FRONT_CAMERA;
     private final ExecutorService exportExecutor = Executors.newSingleThreadExecutor();
+
+    private float sourceVolumeLevel = 1.0f;
+    private float micVolumeLevel = 1.0f;
+    private boolean recordingPaused = false;
+    private boolean stopping = false;
+
+    // PIP geometry is kept as fractions so the export matches the preview on
+    // different screen sizes and source orientations.
+    private float pipLeftFraction = 0.62f;
+    private float pipTopFraction = 0.08f;
+    private float pipWidthFraction = 0.32f;
 
     @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -80,17 +114,24 @@ public class CameraVideoPipActivity extends AppCompatActivity {
     private void buildUi() {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF000000);
+
         cameraPreview = new PreviewView(this);
         cameraPreview.setScaleType(PreviewView.ScaleType.FILL_CENTER);
         root.addView(cameraPreview, new FrameLayout.LayoutParams(-1, -1));
 
+        // The source video is the draggable/resizable PIP. The camera remains
+        // the full-screen live surface and therefore becomes the final-video base.
+        pipContainer = new FrameLayout(this);
+        pipContainer.setBackgroundColor(0xCC000000);
         videoView = new PlayerView(this);
         videoView.setUseController(true);
         videoView.setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING);
         videoView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
-        FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams(dp(190), dp(320), Gravity.TOP | Gravity.END);
-        pip.setMargins(0, dp(64), dp(12), 0);
-        root.addView(videoView, pip);
+        pipContainer.addView(videoView, new FrameLayout.LayoutParams(-1, -1));
+        FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams(dp(190), dp(320), Gravity.TOP | Gravity.START);
+        root.addView(pipContainer, pip);
+        pipContainer.post(this::syncPipGeometry);
+        installPipDrag();
 
         status = new TextView(this);
         status.setText("Load a video, then start commentary");
@@ -99,19 +140,58 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         sp.setMargins(dp(12), dp(12), dp(12), 0); root.addView(status, sp);
 
-        Button load = new Button(this); load.setText("LOAD VIDEO"); load.setOnClickListener(v -> chooseVideo());
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, dp(52), Gravity.BOTTOM | Gravity.START);
-        lp.setMargins(dp(12), 0, 0, dp(12)); root.addView(load, lp);
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+        controls.setPadding(dp(8), dp(6), dp(8), dp(6));
+        controls.setBackgroundColor(0xCC101010);
+        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(dp(310), -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        cp.setMargins(dp(8), 0, dp(8), dp(8));
 
-        commentaryButton = new Button(this); commentaryButton.setText("START COMMENTARY");
-        commentaryButton.setOnClickListener(v -> toggleCommentary());
-        FrameLayout.LayoutParams rp = new FrameLayout.LayoutParams(-2, dp(52), Gravity.BOTTOM | Gravity.END);
-        rp.setMargins(0, 0, dp(12), dp(12)); root.addView(commentaryButton, rp);
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setGravity(Gravity.CENTER_VERTICAL);
+        Button load = new Button(this); load.setText("LOAD VIDEO"); load.setOnClickListener(v -> chooseVideo());
+        flipButton = new Button(this); flipButton.setText("FLIP CAMERA"); flipButton.setOnClickListener(v -> flipCamera());
+        buttons.addView(load, new LinearLayout.LayoutParams(0, dp(48), 1));
+        buttons.addView(flipButton, new LinearLayout.LayoutParams(0, dp(48), 1));
+        controls.addView(buttons);
+
+        sourceVolumeLabel = new TextView(this); sourceVolumeLabel.setTextColor(0xFFFFFFFF); sourceVolumeLabel.setText("Video volume 100%");
+        controls.addView(sourceVolumeLabel);
+        sourceVolume = volumeBar(100, 100, value -> {
+            sourceVolumeLevel = value / 100f; if (player != null) player.setVolume(sourceVolumeLevel);
+            sourceVolumeLabel.setText("Video volume " + value + "%");
+        });
+        controls.addView(sourceVolume);
+
+        micVolumeLabel = new TextView(this); micVolumeLabel.setTextColor(0xFFFFFFFF); micVolumeLabel.setText("Mic volume 100%");
+        controls.addView(micVolumeLabel);
+        micVolume = volumeBar(100, 100, value -> {
+            micVolumeLevel = value / 100f; micVolumeLabel.setText("Mic volume " + value + "%");
+        });
+        controls.addView(micVolume);
+
+        LinearLayout actions = new LinearLayout(this); actions.setGravity(Gravity.CENTER_VERTICAL);
+        pauseButton = new Button(this); pauseButton.setText("PAUSE"); pauseButton.setEnabled(false); pauseButton.setOnClickListener(v -> togglePause());
+        commentaryButton = new Button(this); commentaryButton.setText("START COMMENTARY"); commentaryButton.setOnClickListener(v -> toggleCommentary());
+        actions.addView(pauseButton, new LinearLayout.LayoutParams(0, dp(50), 1));
+        actions.addView(commentaryButton, new LinearLayout.LayoutParams(0, dp(50), 1));
+        controls.addView(actions);
+        root.addView(controls, cp);
+
+        exportProgress = new ProgressBar(this);
+        exportProgress.setIndeterminate(true);
+        exportProgress.setVisibility(View.GONE);
+        FrameLayout.LayoutParams ep = new FrameLayout.LayoutParams(dp(54), dp(54), Gravity.CENTER);
+        root.addView(exportProgress, ep);
         setContentView(root);
     }
 
+    private SeekBar volumeBar(int max, int progress, SeekBar.OnSeekBarChangeListener listener) {
+        SeekBar bar = new SeekBar(this); bar.setMax(max); bar.setProgress(progress); bar.setOnSeekBarChangeListener(listener); return bar;
+    }
+
     private void chooseVideo() {
-        if (recording != null) return;
+        if (recording != null || stopping) return;
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("video/*");
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
@@ -124,11 +204,13 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         sourceUri = data.getData();
         try { getContentResolver().takePersistableUriPermission(sourceUri, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignored) { }
         try {
+            cleanup(sourceFile);
             sourceFile = copySourceToCache(sourceUri);
             play(sourceUri);
-            status.setText("Source loaded — press START COMMENTARY");
+            status.setText("Source loaded — drag/resize the PIP, then start commentary");
         } catch (Exception e) {
-            sourceUri = null; Toast.makeText(this, "Could not read selected video", Toast.LENGTH_LONG).show();
+            sourceUri = null; sourceFile = null;
+            Toast.makeText(this, "Could not read selected video", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -145,124 +227,222 @@ public class CameraVideoPipActivity extends AppCompatActivity {
     private void play(Uri uri) {
         if (player != null) player.release();
         player = new ExoPlayer.Builder(this).build();
-        videoView.setPlayer(player); player.setMediaItem(MediaItem.fromUri(uri));
+        videoView.setPlayer(player);
+        player.setMediaItem(MediaItem.fromUri(uri));
+        player.setVolume(sourceVolumeLevel);
+        player.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int state) {
+                if (state == Player.STATE_ENDED && recording != null && !stopping) stopCommentary();
+            }
+        });
         player.prepare(); player.seekTo(0); player.setPlayWhenReady(false);
     }
 
     private void toggleCommentary() {
         if (recording != null) { stopCommentary(); return; }
-        if (sourceFile == null || !sourceFile.exists()) {
-            Toast.makeText(this, "Load a video first", Toast.LENGTH_SHORT).show(); return;
-        }
+        if (stopping) return;
+        if (sourceFile == null || !sourceFile.exists()) { Toast.makeText(this, "Load a video first", Toast.LENGTH_SHORT).show(); return; }
         if (!hasCameraAudioPermission()) {
-            ActivityCompat.requestPermissions(this,
-                    new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO}, REQUEST_CAMERA_AUDIO); return;
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO}, REQUEST_CAMERA_AUDIO); return;
         }
-        if (videoCapture == null) {
-            Toast.makeText(this, "Camera is still starting", Toast.LENGTH_SHORT).show(); return;
-        }
+        if (videoCapture == null) { Toast.makeText(this, "Camera is still starting", Toast.LENGTH_SHORT).show(); return; }
+        syncPipGeometry();
         cameraFile = new File(getCacheDir(), "pip_camera_" + System.currentTimeMillis() + ".mp4");
         FileOutputOptions output = new FileOutputOptions.Builder(cameraFile).build();
-        recording = videoCapture.getOutput().prepareRecording(this, output).withAudioEnabled()
-                .start(ContextCompat.getMainExecutor(this), this::onVideoRecordEvent);
-        player.seekTo(0); player.setPlayWhenReady(true);
-        commentaryButton.setText("STOP & SAVE");
-        status.setText("● Recording — source video + live camera + microphone");
+        try {
+            recording = videoCapture.getOutput().prepareRecording(this, output).withAudioEnabled()
+                    .start(ContextCompat.getMainExecutor(this), this::onVideoRecordEvent);
+        } catch (Exception e) {
+            recording = null; Toast.makeText(this, "Could not start camera recording", Toast.LENGTH_LONG).show(); return;
+        }
+        stopping = false; recordingPaused = false;
+        player.seekTo(0); player.setVolume(sourceVolumeLevel); player.setPlayWhenReady(true);
+        commentaryButton.setText("STOP & SAVE"); pauseButton.setEnabled(true); pauseButton.setText("PAUSE");
+        flipButton.setEnabled(false); status.setText("● Recording — camera + microphone + source video");
+    }
+
+    private void togglePause() {
+        if (recording == null || stopping) return;
+        try {
+            if (recordingPaused) {
+                recording.resume(); player.setPlayWhenReady(true); recordingPaused = false; pauseButton.setText("PAUSE"); status.setText("● Recording resumed");
+            } else {
+                recording.pause(); player.setPlayWhenReady(false); recordingPaused = true; pauseButton.setText("RESUME"); status.setText("Ⅱ Paused — synchronization preserved");
+            }
+        } catch (Exception e) { Toast.makeText(this, "Pause/resume is unavailable on this device", Toast.LENGTH_SHORT).show(); }
     }
 
     private void stopCommentary() {
-        if (recording != null) {
-            recording.stop(); recording = null;
-            commentaryButton.setEnabled(false); commentaryButton.setText("PROCESSING…");
-            status.setText("Finalizing recording…");
-        }
+        if (recording == null || stopping) return;
+        stopping = true; recordingPaused = false;
+        try { if (recordingPaused) recording.resume(); } catch (Exception ignored) { }
+        player.setPlayWhenReady(false);
+        recording.stop();
+        commentaryButton.setEnabled(false); pauseButton.setEnabled(false); flipButton.setEnabled(false); commentaryButton.setText("FINALIZING…");
+        status.setText("Finalizing camera recording…");
     }
 
     private void onVideoRecordEvent(VideoRecordEvent event) {
         if (!(event instanceof VideoRecordEvent.Finalize)) return;
         VideoRecordEvent.Finalize finalize = (VideoRecordEvent.Finalize) event;
-        if (finalize.hasError()) {
-            runOnUiThread(() -> resetAfterFailure("Recording failed: " + finalize.getError())); return;
-        }
+        if (finalize.hasError()) { runOnUiThread(() -> resetAfterFailure("Recording failed: " + finalize.getError())); return; }
         composeFinalVideo();
     }
 
     private void composeFinalVideo() {
+        exportProgress.setVisibility(View.VISIBLE);
+        status.setText("Exporting reaction video… 0–100%");
         exportExecutor.execute(() -> {
+            File output = new File(getCacheDir(), "pip_final_" + System.currentTimeMillis() + ".mp4");
             try {
-                File output = new File(getCacheDir(), "pip_final_" + System.currentTimeMillis() + ".mp4");
+                if (cameraFile == null || !cameraFile.exists()) throw new IllegalStateException("Camera recording is missing");
                 boolean sourceHasAudio = hasAudio(sourceFile);
-                String camera = shell(cameraFile.getAbsolutePath()), source = shell(sourceFile.getAbsolutePath()), out = shell(output.getAbsolutePath());
+                float width = Math.max(0.16f, Math.min(0.55f, pipWidthFraction));
+                float x = Math.max(0f, Math.min(0.84f, pipLeftFraction));
+                float y = Math.max(0f, Math.min(0.84f, pipTopFraction));
+                String camera = quote(cameraFile.getAbsolutePath()), source = quote(sourceFile.getAbsolutePath()), out = quote(output.getAbsolutePath());
+                String camAudio = "[1:a]volume=" + formatVolume(micVolumeLevel) + "[ca]";
+                String videoFilter = "[0:v]scale=" + formatFraction(width) + "*W:-2[pip];[1:v][pip]overlay=x=" + formatFraction(x) + "*W:y=" + formatFraction(y) + "*H:shortest=1[v]";
                 String command;
                 if (sourceHasAudio) {
-                    command = "-y -i " + source + " -i " + camera
-                            + " -filter_complex \"[1:v]scale=iw*0.32:-2[cam];[0:v][cam]overlay=W-w-24:H-h-24:shortest=1[v];[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2[a]\""
+                    command = "-y -autorotate 1 -i " + source + " -i " + camera
+                            + " -filter_complex \"[0:a]volume=" + formatVolume(sourceVolumeLevel) + "[sa];" + camAudio + ";"
+                            + videoFilter + ";[sa][ca]amix=inputs=2:duration=shortest:dropout_transition=2[a]\""
                             + " -map \"[v]\" -map \"[a]\" -shortest -movflags +faststart " + out;
                 } else {
-                    command = "-y -i " + source + " -i " + camera
-                            + " -filter_complex \"[1:v]scale=iw*0.32:-2[cam];[0:v][cam]overlay=W-w-24:H-h-24:shortest=1[v]\""
-                            + " -map \"[v]\" -map 1:a? -shortest -movflags +faststart " + out;
+                    command = "-y -autorotate 1 -i " + source + " -i " + camera
+                            + " -filter_complex \"" + videoFilter + ";" + camAudio + "\""
+                            + " -map \"[v]\" -map \"[ca]\" -shortest -movflags +faststart " + out;
                 }
                 if (!ReturnCode.isSuccess(FFmpegKit.execute(command).getReturnCode())) throw new IllegalStateException("Video composition failed");
                 saveToMediaStore(output);
                 cleanup(sourceFile, cameraFile, output);
-                runOnUiThread(() -> {
-                    commentaryButton.setEnabled(true); commentaryButton.setText("START COMMENTARY");
-                    status.setText("Saved reaction video to Movies/FadCam");
-                    Toast.makeText(this, "Reaction video saved", Toast.LENGTH_LONG).show();
-                });
+                runOnUiThread(() -> resetAfterSuccess());
             } catch (Exception e) {
-                runOnUiThread(() -> resetAfterFailure("Export failed — recordings retained"));
+                runOnUiThread(() -> resetAfterFailure("Export failed — source and camera recordings retained"));
             }
         });
     }
 
+    private void resetAfterSuccess() {
+        exportProgress.setVisibility(View.GONE); stopping = false; recording = null; cameraFile = null;
+        commentaryButton.setEnabled(true); commentaryButton.setText("START COMMENTARY"); pauseButton.setEnabled(false); flipButton.setEnabled(true);
+        status.setText("Saved reaction video to Movies/FadCam");
+        Toast.makeText(this, "Reaction video saved", Toast.LENGTH_LONG).show();
+    }
+
     private void resetAfterFailure(String message) {
-        commentaryButton.setEnabled(true); commentaryButton.setText("START COMMENTARY"); status.setText(message);
-        if (player != null) player.pause();
+        exportProgress.setVisibility(View.GONE); stopping = false; recording = null;
+        commentaryButton.setEnabled(true); commentaryButton.setText("START COMMENTARY"); pauseButton.setEnabled(false); flipButton.setEnabled(true);
+        status.setText(message); if (player != null) player.pause();
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
     private boolean hasAudio(File file) {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-        try { retriever.setDataSource(file.getAbsolutePath()); return "yes".equalsIgnoreCase(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)); }
-        catch (Exception ignored) { return true; } finally { retriever.release(); }
+        try {
+            retriever.setDataSource(file.getAbsolutePath());
+            String value = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO);
+            return "yes".equalsIgnoreCase(value);
+        } catch (Exception ignored) { return false; }
+        finally { retriever.release(); }
     }
 
     private void saveToMediaStore(File file) throws Exception {
         ContentResolver resolver = getContentResolver(); ContentValues values = new ContentValues();
         values.put(MediaStore.Video.Media.DISPLAY_NAME, "FadCam_Reaction_" + System.currentTimeMillis() + ".mp4");
         values.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
-        values.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/FadCam");
-        values.put(MediaStore.Video.Media.IS_PENDING, 1);
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            values.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/FadCam");
+            values.put(MediaStore.Video.Media.IS_PENDING, 1);
+        }
         Uri uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
         if (uri == null) throw new IllegalStateException("Could not create MediaStore item");
         try {
-            try (InputStream in = new java.io.FileInputStream(file); java.io.OutputStream out = resolver.openOutputStream(uri)) {
+            try (InputStream in = new java.io.FileInputStream(file); OutputStream out = resolver.openOutputStream(uri)) {
                 if (out == null) throw new IllegalStateException("Could not open output");
                 byte[] buffer = new byte[64 * 1024]; int read;
                 while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
             }
-            ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0); resolver.update(uri, done, null, null);
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0); resolver.update(uri, done, null, null);
+            }
         } catch (Exception e) { resolver.delete(uri, null, null); throw e; }
     }
 
-    private void cleanup(File... files) { for (File file : files) if (file != null) file.delete(); }
-    private String shell(String path) { return "\"" + path.replace("\\", "\\\\").replace("\"", "\\\"") + "\""; }
+    private void flipCamera() {
+        if (recording != null || videoCapture == null) return;
+        currentCamera = currentCamera == CameraSelector.DEFAULT_FRONT_CAMERA ? CameraSelector.DEFAULT_BACK_CAMERA : CameraSelector.DEFAULT_FRONT_CAMERA;
+        bindCamera(currentCamera);
+    }
 
     private void startCamera() {
         ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
         future.addListener(() -> {
-            try {
-                ProcessCameraProvider provider = future.get(); Preview preview = new Preview.Builder().build();
-                preview.setSurfaceProvider(cameraPreview.getSurfaceProvider());
-                Recorder recorder = new Recorder.Builder().setQualitySelector(QualitySelector.from(Quality.HD,
-                        FallbackStrategy.higherQualityOrLowerThan(Quality.HD))).build();
-                videoCapture = VideoCapture.withOutput(recorder);
-                provider.unbindAll(); provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, preview, videoCapture);
-            } catch (Exception e) { Toast.makeText(this, "Camera unavailable: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+            try { bindCamera(currentCamera); }
+            catch (Exception e) { Toast.makeText(this, "Camera unavailable: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
         }, ContextCompat.getMainExecutor(this));
     }
+
+    private void bindCamera(CameraSelector selector) {
+        ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
+        future.addListener(() -> {
+            try {
+                ProcessCameraProvider provider = future.get();
+                Preview preview = new Preview.Builder().build(); preview.setSurfaceProvider(cameraPreview.getSurfaceProvider());
+                Recorder recorder = new Recorder.Builder().setQualitySelector(QualitySelector.from(Quality.HD,
+                        FallbackStrategy.lowerQualityOrHigherThan(Quality.HD))).build();
+                videoCapture = VideoCapture.withOutput(recorder);
+                provider.unbindAll(); provider.bindToLifecycle(this, selector, preview, videoCapture);
+            } catch (Exception e) { videoCapture = null; Toast.makeText(this, "Camera unavailable: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+        }, ContextCompat.getMainExecutor(this));
+    }
+
+    private void installPipDrag() {
+        pipContainer.setOnTouchListener(new View.OnTouchListener() {
+            float downX, downY; int startLeft, startTop;
+            @Override public boolean onTouch(View v, MotionEvent event) {
+                if (recording != null || stopping) return true;
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        downX = event.getRawX(); downY = event.getRawY(); startLeft = v.getLeft(); startTop = v.getTop(); return true;
+                    case MotionEvent.ACTION_MOVE:
+                        int maxX = Math.max(0, ((View) v.getParent()).getWidth() - v.getWidth());
+                        int maxY = Math.max(0, ((View) v.getParent()).getHeight() - v.getHeight());
+                        int left = clamp(startLeft + (int)(event.getRawX() - downX), 0, maxX);
+                        int top = clamp(startTop + (int)(event.getRawY() - downY), 0, maxY);
+                        v.setX(left); v.setY(top); syncPipGeometry(); return true;
+                    case MotionEvent.ACTION_UP: syncPipGeometry(); return true;
+                    default: return true;
+                }
+            }
+        });
+        // Double-tap toggles a useful compact/large size without adding a new
+        // permanent control over the camera surface.
+        pipContainer.setOnClickListener(v -> {
+            if (recording != null || stopping) return;
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) pipContainer.getLayoutParams();
+            int newWidth = lp.width <= dp(220) ? dp(300) : dp(190);
+            int newHeight = Math.max(dp(MIN_PIP_DP), (int)(newWidth * 1.68f));
+            lp.width = Math.min(dp(MAX_PIP_DP), newWidth); lp.height = newHeight; pipContainer.setLayoutParams(lp); syncPipGeometry();
+        });
+    }
+
+    private void syncPipGeometry() {
+        if (pipContainer == null || pipContainer.getParent() == null) return;
+        View parent = (View) pipContainer.getParent();
+        if (parent.getWidth() <= 0 || parent.getHeight() <= 0) return;
+        pipLeftFraction = clampFloat(pipContainer.getX() / parent.getWidth(), 0f, 0.84f);
+        pipTopFraction = clampFloat(pipContainer.getY() / parent.getHeight(), 0f, 0.84f);
+        pipWidthFraction = clampFloat((float)pipContainer.getWidth() / parent.getWidth(), 0.16f, 0.55f);
+    }
+
+    private String formatFraction(float value) { return String.format(java.util.Locale.US, "%.5f", value); }
+    private String formatVolume(float value) { return String.format(java.util.Locale.US, "%.3f", Math.max(0f, Math.min(1f, value))); }
+    private String quote(String path) { return "\"" + path.replace("\\", "\\\\").replace("\"", "\\\"") + "\""; }
+    private int clamp(int value, int min, int max) { return Math.max(min, Math.min(max, value)); }
+    private float clampFloat(float value, float min, float max) { return Math.max(min, Math.min(max, value)); }
+    private int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + .5f); }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -273,10 +453,8 @@ public class CameraVideoPipActivity extends AppCompatActivity {
     }
 
     @Override protected void onDestroy() {
-        if (recording != null) { recording.stop(); recording = null; }
+        if (recording != null) { try { recording.stop(); } catch (Exception ignored) { } recording = null; }
         if (player != null) { player.release(); player = null; }
         exportExecutor.shutdownNow(); super.onDestroy();
     }
-
-    private int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + .5f); }
 }
