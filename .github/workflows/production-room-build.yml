@@ -16,5 +16,10 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
+      - name: Restore patched Media3
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch release https://github.com/anonfaded/media3-patched.git /tmp/media3-patched
+          test -f /tmp/media3-patched/libraries/muxer/src/main/java/androidx/media3/muxer/ProcessedSegment.java
       - name: Build default debug
         run: ./gradlew :app:assembleDefaultDebug --no-daemon --no-watch-fs --stacktrace --max-workers=1
