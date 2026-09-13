@@ -466,4 +466,10 @@ We look forward to your contributions!
 - Location reverse geocoding powered by <a target="_blank" href="https://nominatim.org/">Nominatim</a> — free, open-source geocoding based on <a target="_blank" href="https://www.openstreetmap.org/">OpenStreetMap</a> data. Building-level precision (zoom=18) for accurate address watermarking.
 - QR codes generated using <a target="_blank" href="https://www.qrcodechimp.com">QRCodeChimp</a>.
 
+<!-- FADCAM-APK-DOWNLOAD:START -->
+## `>_` 📦 Latest Debug APK
 
+[![Download Latest APK](https://img.shields.io/badge/Download-Latest%20APK-brightgreen?logo=android)](https://github.com/Trendyzima/FadCam/actions/runs/34759622564)
+
+The latest successful production-room debug APK is published as the **FadCam-default-debug-apk** artifact on GitHub Actions. Open the build page above and download the APK from **Artifacts**.
+<!-- FADCAM-APK-DOWNLOAD:END -->
