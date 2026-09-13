@@ -19,7 +19,10 @@ jobs:
       - name: Restore patched Media3
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch release https://github.com/anonfaded/media3-patched.git /tmp/media3-patched
+          MEDIA3_SHA=b0cfc8c399fed33a0f9e464fbc03a9c60a195599
+          git clone --no-checkout https://github.com/anonfaded/media3-patched.git /tmp/media3-patched
+          git -C /tmp/media3-patched fetch --depth 1 origin "$MEDIA3_SHA"
+          git -C /tmp/media3-patched checkout --detach "$MEDIA3_SHA"
           test -f /tmp/media3-patched/libraries/muxer/src/main/java/androidx/media3/muxer/ProcessedSegment.java
       - name: Build default debug
         run: ./gradlew :app:assembleDefaultDebug --no-daemon --no-watch-fs --stacktrace --max-workers=1
