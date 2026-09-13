@@ -54,7 +54,6 @@ jobs:
       - name: Publish APK download entry to README
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -65,13 +64,19 @@ jobs:
           text = p.read_text(encoding='utf-8')
           start = '<!-- FADCAM-APK-DOWNLOAD:START -->'
           end = '<!-- FADCAM-APK-DOWNLOAD:END -->'
-          block = f'''{start}\n## `>_` 📦 Latest Debug APK\n\n[![Download Latest APK](https://img.shields.io/badge/Download-Latest%20APK-brightgreen?logo=android)]({os.environ["RUN_URL"]})\n\nThe latest successful production-room debug APK is published as the **FadCam-default-debug-apk** artifact on GitHub Actions. Open the build page above and download the APK from **Artifacts**.\n{end}'''
+          block = f'''{start}
+          ## `>_` 📦 Latest Debug APK
+
+          [![Download Latest APK](https://img.shields.io/badge/Download-Latest%20APK-brightgreen?logo=android)]({os.environ["RUN_URL"]})
+
+          The latest successful production-room debug APK is published as the **FadCam-default-debug-apk** artifact on GitHub Actions. Open the build page above and download the APK from **Artifacts**.
+          {end}'''.replace('          ', '', 1)
           if start in text and end in text:
               a = text.index(start)
               b = text.index(end, a) + len(end)
               text = text[:a] + block + text[b:]
           else:
-              text = text.rstrip() + '\n\n' + block + '\n'
+              text = block + '\n\n' + text.lstrip()
           p.write_text(text, encoding='utf-8')
           PY
           git config user.name 'github-actions[bot]'
