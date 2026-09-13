@@ -44,47 +44,26 @@ jobs:
             exit 1
           fi
           echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: FadCam-default-debug-apk
           path: ${{ steps.locate_apk.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 14
-      - name: Publish APK download entry to README
-        shell: bash
+      - name: Publish APK release asset
         env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+          APK_PATH: ${{ steps.locate_apk.outputs.apk_path }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-          p = Path('README.md')
-          text = p.read_text(encoding='utf-8')
-          start = '<!-- FADCAM-APK-DOWNLOAD:START -->'
-          end = '<!-- FADCAM-APK-DOWNLOAD:END -->'
-          block = f'''{start}
-          ## `>_` 📦 Latest Debug APK
-
-          [![Download Latest APK](https://img.shields.io/badge/Download-Latest%20APK-brightgreen?logo=android)]({os.environ["RUN_URL"]})
-
-          The latest successful production-room debug APK is published as the **FadCam-default-debug-apk** artifact on GitHub Actions. Open the build page above and download the APK from **Artifacts**.
-          {end}'''.replace('          ', '', 1)
-          if start in text and end in text:
-              a = text.index(start)
-              b = text.index(end, a) + len(end)
-              text = text[:a] + block + text[b:]
-          else:
-              text = block + '\n\n' + text.lstrip()
-          p.write_text(text, encoding='utf-8')
-          PY
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add README.md
-          if git diff --cached --quiet; then
-            echo 'README already contains the current APK download entry.'
-            exit 0
+          if gh release view latest-debug >/dev/null 2>&1; then
+            gh release edit latest-debug --target "$GITHUB_SHA" --title "FadCam Latest Debug APK" --prerelease
+          else
+            gh release create latest-debug \
+              --target "$GITHUB_SHA" \
+              --title "FadCam Latest Debug APK" \
+              --notes "Automatically published debug APK from the latest successful Production Room Build." \
+              --prerelease
           fi
-          git commit -m "docs: publish latest APK download link"
-          git push
+          gh release upload latest-debug "$APK_PATH#FadCam-default-debug.apk" --clobber
