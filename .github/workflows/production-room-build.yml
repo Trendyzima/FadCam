@@ -26,10 +26,23 @@ jobs:
           test -f /tmp/media3-patched/libraries/muxer/src/main/java/androidx/media3/muxer/ProcessedSegment.java
       - name: Build default debug
         run: ./gradlew :app:assembleDefaultDebug --no-daemon --no-watch-fs --stacktrace --max-workers=1
+      - name: Locate APK
+        id: locate_apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Built APK files:"
+          find app/build/outputs/apk -type f -name '*.apk' -print
+          APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' -print -quit)"
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: assembleDefaultDebug completed but no APK was found under app/build/outputs/apk"
+            exit 1
+          fi
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: FadCam-default-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.locate_apk.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 14
