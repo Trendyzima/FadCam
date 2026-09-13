@@ -51,12 +51,13 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * Reaction/commentary workspace.
- * Live camera is the final-video background; the selected source video is the
+ * The live camera is the final-video base; the selected source video is a
  * movable/resizable PIP while the user talks into the microphone.
  */
 public class CameraVideoPipActivity extends AppCompatActivity {
@@ -79,7 +80,6 @@ public class CameraVideoPipActivity extends AppCompatActivity {
     private SeekBar micVolume;
 
     private ExoPlayer player;
-    private Uri sourceUri;
     private File sourceFile;
     private File cameraFile;
     private Recording recording;
@@ -89,11 +89,8 @@ public class CameraVideoPipActivity extends AppCompatActivity {
 
     private float sourceVolumeLevel = 1.0f;
     private float micVolumeLevel = 1.0f;
-    private boolean recordingPaused = false;
-    private boolean stopping = false;
-
-    // PIP geometry is kept as fractions so the export matches the preview on
-    // different screen sizes and source orientations.
+    private boolean recordingPaused;
+    private boolean stopping;
     private float pipLeftFraction = 0.62f;
     private float pipTopFraction = 0.08f;
     private float pipWidthFraction = 0.32f;
@@ -119,8 +116,6 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         cameraPreview.setScaleType(PreviewView.ScaleType.FILL_CENTER);
         root.addView(cameraPreview, new FrameLayout.LayoutParams(-1, -1));
 
-        // The source video is the draggable/resizable PIP. The camera remains
-        // the full-screen live surface and therefore becomes the final-video base.
         pipContainer = new FrameLayout(this);
         pipContainer.setBackgroundColor(0xCC000000);
         videoView = new PlayerView(this);
@@ -128,6 +123,15 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         videoView.setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING);
         videoView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
         pipContainer.addView(videoView, new FrameLayout.LayoutParams(-1, -1));
+
+        Button resize = new Button(this);
+        resize.setText("↘");
+        resize.setTextSize(16);
+        resize.setOnTouchListener(new ResizeTouchListener());
+        FrameLayout.LayoutParams resizeLp = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM | Gravity.END);
+        resizeLp.setMargins(0, 0, dp(2), dp(2));
+        pipContainer.addView(resize, resizeLp);
+
         FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams(dp(190), dp(320), Gravity.TOP | Gravity.START);
         root.addView(pipContainer, pip);
         pipContainer.post(this::syncPipGeometry);
@@ -144,33 +148,25 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(dp(8), dp(6), dp(8), dp(6));
         controls.setBackgroundColor(0xCC101010);
-        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(dp(310), -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(dp(320), -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         cp.setMargins(dp(8), 0, dp(8), dp(8));
 
         LinearLayout buttons = new LinearLayout(this);
-        buttons.setGravity(Gravity.CENTER_VERTICAL);
         Button load = new Button(this); load.setText("LOAD VIDEO"); load.setOnClickListener(v -> chooseVideo());
         flipButton = new Button(this); flipButton.setText("FLIP CAMERA"); flipButton.setOnClickListener(v -> flipCamera());
         buttons.addView(load, new LinearLayout.LayoutParams(0, dp(48), 1));
         buttons.addView(flipButton, new LinearLayout.LayoutParams(0, dp(48), 1));
         controls.addView(buttons);
 
-        sourceVolumeLabel = new TextView(this); sourceVolumeLabel.setTextColor(0xFFFFFFFF); sourceVolumeLabel.setText("Video volume 100%");
-        controls.addView(sourceVolumeLabel);
-        sourceVolume = volumeBar(100, 100, value -> {
-            sourceVolumeLevel = value / 100f; if (player != null) player.setVolume(sourceVolumeLevel);
-            sourceVolumeLabel.setText("Video volume " + value + "%");
-        });
+        sourceVolumeLabel = new TextView(this); sourceVolumeLabel.setTextColor(0xFFFFFFFF); sourceVolumeLabel.setText("Video volume 100%"); controls.addView(sourceVolumeLabel);
+        sourceVolume = volumeBar(100, 100, new VolumeListener() { @Override public void onChanged(int value) { sourceVolumeLevel = value / 100f; if (player != null) player.setVolume(sourceVolumeLevel); sourceVolumeLabel.setText("Video volume " + value + "%"); }});
         controls.addView(sourceVolume);
 
-        micVolumeLabel = new TextView(this); micVolumeLabel.setTextColor(0xFFFFFFFF); micVolumeLabel.setText("Mic volume 100%");
-        controls.addView(micVolumeLabel);
-        micVolume = volumeBar(100, 100, value -> {
-            micVolumeLevel = value / 100f; micVolumeLabel.setText("Mic volume " + value + "%");
-        });
+        micVolumeLabel = new TextView(this); micVolumeLabel.setTextColor(0xFFFFFFFF); micVolumeLabel.setText("Mic volume 100%"); controls.addView(micVolumeLabel);
+        micVolume = volumeBar(100, 100, new VolumeListener() { @Override public void onChanged(int value) { micVolumeLevel = value / 100f; micVolumeLabel.setText("Mic volume " + value + "%"); }});
         controls.addView(micVolume);
 
-        LinearLayout actions = new LinearLayout(this); actions.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout actions = new LinearLayout(this);
         pauseButton = new Button(this); pauseButton.setText("PAUSE"); pauseButton.setEnabled(false); pauseButton.setOnClickListener(v -> togglePause());
         commentaryButton = new Button(this); commentaryButton.setText("START COMMENTARY"); commentaryButton.setOnClickListener(v -> toggleCommentary());
         actions.addView(pauseButton, new LinearLayout.LayoutParams(0, dp(50), 1));
@@ -179,15 +175,22 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         root.addView(controls, cp);
 
         exportProgress = new ProgressBar(this);
-        exportProgress.setIndeterminate(true);
-        exportProgress.setVisibility(View.GONE);
-        FrameLayout.LayoutParams ep = new FrameLayout.LayoutParams(dp(54), dp(54), Gravity.CENTER);
-        root.addView(exportProgress, ep);
+        exportProgress.setIndeterminate(true); exportProgress.setVisibility(View.GONE);
+        root.addView(exportProgress, new FrameLayout.LayoutParams(dp(54), dp(54), Gravity.CENTER));
         setContentView(root);
     }
 
-    private SeekBar volumeBar(int max, int progress, SeekBar.OnSeekBarChangeListener listener) {
-        SeekBar bar = new SeekBar(this); bar.setMax(max); bar.setProgress(progress); bar.setOnSeekBarChangeListener(listener); return bar;
+    private interface VolumeListener { void onChanged(int value); }
+
+    private SeekBar volumeBar(int max, int progress, VolumeListener listener) {
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(max); bar.setProgress(progress);
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int value, boolean fromUser) { if (fromUser) listener.onChanged(value); }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
+            @Override public void onStopTrackingTouch(SeekBar seekBar) { }
+        });
+        return bar;
     }
 
     private void chooseVideo() {
@@ -201,16 +204,15 @@ public class CameraVideoPipActivity extends AppCompatActivity {
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != PICK_VIDEO || resultCode != RESULT_OK || data == null || data.getData() == null) return;
-        sourceUri = data.getData();
-        try { getContentResolver().takePersistableUriPermission(sourceUri, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignored) { }
+        Uri uri = data.getData();
+        try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignored) { }
         try {
             cleanup(sourceFile);
-            sourceFile = copySourceToCache(sourceUri);
-            play(sourceUri);
-            status.setText("Source loaded — drag/resize the PIP, then start commentary");
+            sourceFile = copySourceToCache(uri);
+            play(uri);
+            status.setText("Source loaded — drag PIP, use ↘ to resize, then start");
         } catch (Exception e) {
-            sourceUri = null; sourceFile = null;
-            Toast.makeText(this, "Could not read selected video", Toast.LENGTH_LONG).show();
+            sourceFile = null; Toast.makeText(this, "Could not read selected video", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -242,14 +244,13 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         if (recording != null) { stopCommentary(); return; }
         if (stopping) return;
         if (sourceFile == null || !sourceFile.exists()) { Toast.makeText(this, "Load a video first", Toast.LENGTH_SHORT).show(); return; }
-        if (!hasCameraAudioPermission()) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO}, REQUEST_CAMERA_AUDIO); return;
-        }
+        if (!hasCameraAudioPermission()) { ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO}, REQUEST_CAMERA_AUDIO); return; }
         if (videoCapture == null) { Toast.makeText(this, "Camera is still starting", Toast.LENGTH_SHORT).show(); return; }
+
         syncPipGeometry();
         cameraFile = new File(getCacheDir(), "pip_camera_" + System.currentTimeMillis() + ".mp4");
-        FileOutputOptions output = new FileOutputOptions.Builder(cameraFile).build();
         try {
+            FileOutputOptions output = new FileOutputOptions.Builder(cameraFile).build();
             recording = videoCapture.getOutput().prepareRecording(this, output).withAudioEnabled()
                     .start(ContextCompat.getMainExecutor(this), this::onVideoRecordEvent);
         } catch (Exception e) {
@@ -257,8 +258,8 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         }
         stopping = false; recordingPaused = false;
         player.seekTo(0); player.setVolume(sourceVolumeLevel); player.setPlayWhenReady(true);
-        commentaryButton.setText("STOP & SAVE"); pauseButton.setEnabled(true); pauseButton.setText("PAUSE");
-        flipButton.setEnabled(false); status.setText("● Recording — camera + microphone + source video");
+        commentaryButton.setText("STOP & SAVE"); pauseButton.setEnabled(true); flipButton.setEnabled(false);
+        status.setText("● Recording — camera + microphone + source video");
     }
 
     private void togglePause() {
@@ -274,10 +275,11 @@ public class CameraVideoPipActivity extends AppCompatActivity {
 
     private void stopCommentary() {
         if (recording == null || stopping) return;
-        stopping = true; recordingPaused = false;
+        stopping = true;
         try { if (recordingPaused) recording.resume(); } catch (Exception ignored) { }
+        recordingPaused = false;
         player.setPlayWhenReady(false);
-        recording.stop();
+        try { recording.stop(); } catch (Exception e) { resetAfterFailure("Could not finalize camera recording"); return; }
         commentaryButton.setEnabled(false); pauseButton.setEnabled(false); flipButton.setEnabled(false); commentaryButton.setText("FINALIZING…");
         status.setText("Finalizing camera recording…");
     }
@@ -290,34 +292,32 @@ public class CameraVideoPipActivity extends AppCompatActivity {
     }
 
     private void composeFinalVideo() {
-        exportProgress.setVisibility(View.VISIBLE);
-        status.setText("Exporting reaction video… 0–100%");
+        exportProgress.setVisibility(View.VISIBLE); status.setText("Exporting reaction video…");
         exportExecutor.execute(() -> {
             File output = new File(getCacheDir(), "pip_final_" + System.currentTimeMillis() + ".mp4");
             try {
                 if (cameraFile == null || !cameraFile.exists()) throw new IllegalStateException("Camera recording is missing");
                 boolean sourceHasAudio = hasAudio(sourceFile);
-                float width = Math.max(0.16f, Math.min(0.55f, pipWidthFraction));
-                float x = Math.max(0f, Math.min(0.84f, pipLeftFraction));
-                float y = Math.max(0f, Math.min(0.84f, pipTopFraction));
+                float width = clampFloat(pipWidthFraction, 0.16f, 0.55f);
+                float x = clampFloat(pipLeftFraction, 0f, 0.84f);
+                float y = clampFloat(pipTopFraction, 0f, 0.84f);
                 String camera = quote(cameraFile.getAbsolutePath()), source = quote(sourceFile.getAbsolutePath()), out = quote(output.getAbsolutePath());
-                String camAudio = "[1:a]volume=" + formatVolume(micVolumeLevel) + "[ca]";
-                String videoFilter = "[0:v]scale=" + formatFraction(width) + "*W:-2[pip];[1:v][pip]overlay=x=" + formatFraction(x) + "*W:y=" + formatFraction(y) + "*H:shortest=1[v]";
+                String videoFilter = "[0:v]scale=" + fraction(width) + "*W:-2[pip];[1:v][pip]overlay=x=" + fraction(x) + "*W:y=" + fraction(y) + "*H:shortest=1[v]";
                 String command;
                 if (sourceHasAudio) {
                     command = "-y -autorotate 1 -i " + source + " -i " + camera
-                            + " -filter_complex \"[0:a]volume=" + formatVolume(sourceVolumeLevel) + "[sa];" + camAudio + ";"
+                            + " -filter_complex \"[0:a]volume=" + volume(sourceVolumeLevel) + "[sa];[1:a]volume=" + volume(micVolumeLevel) + "[ca];"
                             + videoFilter + ";[sa][ca]amix=inputs=2:duration=shortest:dropout_transition=2[a]\""
                             + " -map \"[v]\" -map \"[a]\" -shortest -movflags +faststart " + out;
                 } else {
                     command = "-y -autorotate 1 -i " + source + " -i " + camera
-                            + " -filter_complex \"" + videoFilter + ";" + camAudio + "\""
-                            + " -map \"[v]\" -map \"[ca]\" -shortest -movflags +faststart " + out;
+                            + " -filter_complex \"" + videoFilter + ";[1:a]volume=" + volume(micVolumeLevel) + "[a]\""
+                            + " -map \"[v]\" -map \"[a]\" -shortest -movflags +faststart " + out;
                 }
                 if (!ReturnCode.isSuccess(FFmpegKit.execute(command).getReturnCode())) throw new IllegalStateException("Video composition failed");
                 saveToMediaStore(output);
                 cleanup(sourceFile, cameraFile, output);
-                runOnUiThread(() -> resetAfterSuccess());
+                runOnUiThread(this::resetAfterSuccess);
             } catch (Exception e) {
                 runOnUiThread(() -> resetAfterFailure("Export failed — source and camera recordings retained"));
             }
@@ -327,24 +327,19 @@ public class CameraVideoPipActivity extends AppCompatActivity {
     private void resetAfterSuccess() {
         exportProgress.setVisibility(View.GONE); stopping = false; recording = null; cameraFile = null;
         commentaryButton.setEnabled(true); commentaryButton.setText("START COMMENTARY"); pauseButton.setEnabled(false); flipButton.setEnabled(true);
-        status.setText("Saved reaction video to Movies/FadCam");
-        Toast.makeText(this, "Reaction video saved", Toast.LENGTH_LONG).show();
+        status.setText("Saved reaction video to Movies/FadCam"); Toast.makeText(this, "Reaction video saved", Toast.LENGTH_LONG).show();
     }
 
     private void resetAfterFailure(String message) {
         exportProgress.setVisibility(View.GONE); stopping = false; recording = null;
         commentaryButton.setEnabled(true); commentaryButton.setText("START COMMENTARY"); pauseButton.setEnabled(false); flipButton.setEnabled(true);
-        status.setText(message); if (player != null) player.pause();
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        if (player != null) player.pause(); status.setText(message); Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
     private boolean hasAudio(File file) {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-        try {
-            retriever.setDataSource(file.getAbsolutePath());
-            String value = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO);
-            return "yes".equalsIgnoreCase(value);
-        } catch (Exception ignored) { return false; }
+        try { retriever.setDataSource(file.getAbsolutePath()); return "yes".equalsIgnoreCase(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)); }
+        catch (Exception ignored) { return false; }
         finally { retriever.release(); }
     }
 
@@ -361,12 +356,9 @@ public class CameraVideoPipActivity extends AppCompatActivity {
         try {
             try (InputStream in = new java.io.FileInputStream(file); OutputStream out = resolver.openOutputStream(uri)) {
                 if (out == null) throw new IllegalStateException("Could not open output");
-                byte[] buffer = new byte[64 * 1024]; int read;
-                while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+                byte[] buffer = new byte[64 * 1024]; int read; while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
             }
-            if (android.os.Build.VERSION.SDK_INT >= 29) {
-                ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0); resolver.update(uri, done, null, null);
-            }
+            if (android.os.Build.VERSION.SDK_INT >= 29) { ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0); resolver.update(uri, done, null, null); }
         } catch (Exception e) { resolver.delete(uri, null, null); throw e; }
     }
 
@@ -377,11 +369,7 @@ public class CameraVideoPipActivity extends AppCompatActivity {
     }
 
     private void startCamera() {
-        ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
-        future.addListener(() -> {
-            try { bindCamera(currentCamera); }
-            catch (Exception e) { Toast.makeText(this, "Camera unavailable: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
-        }, ContextCompat.getMainExecutor(this));
+        bindCamera(currentCamera);
     }
 
     private void bindCamera(CameraSelector selector) {
@@ -394,55 +382,59 @@ public class CameraVideoPipActivity extends AppCompatActivity {
                         FallbackStrategy.lowerQualityOrHigherThan(Quality.HD))).build();
                 videoCapture = VideoCapture.withOutput(recorder);
                 provider.unbindAll(); provider.bindToLifecycle(this, selector, preview, videoCapture);
-            } catch (Exception e) { videoCapture = null; Toast.makeText(this, "Camera unavailable: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+            } catch (Exception e) {
+                videoCapture = null; Toast.makeText(this, "Camera unavailable: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            }
         }, ContextCompat.getMainExecutor(this));
     }
 
     private void installPipDrag() {
         pipContainer.setOnTouchListener(new View.OnTouchListener() {
-            float downX, downY; int startLeft, startTop;
+            float downX, downY; float startX, startY;
             @Override public boolean onTouch(View v, MotionEvent event) {
                 if (recording != null || stopping) return true;
                 switch (event.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        downX = event.getRawX(); downY = event.getRawY(); startLeft = v.getLeft(); startTop = v.getTop(); return true;
+                    case MotionEvent.ACTION_DOWN: downX = event.getRawX(); downY = event.getRawY(); startX = v.getX(); startY = v.getY(); return true;
                     case MotionEvent.ACTION_MOVE:
-                        int maxX = Math.max(0, ((View) v.getParent()).getWidth() - v.getWidth());
-                        int maxY = Math.max(0, ((View) v.getParent()).getHeight() - v.getHeight());
-                        int left = clamp(startLeft + (int)(event.getRawX() - downX), 0, maxX);
-                        int top = clamp(startTop + (int)(event.getRawY() - downY), 0, maxY);
-                        v.setX(left); v.setY(top); syncPipGeometry(); return true;
+                        View parent = (View) v.getParent();
+                        float maxX = Math.max(0, parent.getWidth() - v.getWidth()); float maxY = Math.max(0, parent.getHeight() - v.getHeight());
+                        v.setX(clampFloat(startX + event.getRawX() - downX, 0, maxX)); v.setY(clampFloat(startY + event.getRawY() - downY, 0, maxY));
+                        syncPipGeometry(); return true;
                     case MotionEvent.ACTION_UP: syncPipGeometry(); return true;
                     default: return true;
                 }
             }
         });
-        // Double-tap toggles a useful compact/large size without adding a new
-        // permanent control over the camera surface.
-        pipContainer.setOnClickListener(v -> {
-            if (recording != null || stopping) return;
-            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) pipContainer.getLayoutParams();
-            int newWidth = lp.width <= dp(220) ? dp(300) : dp(190);
-            int newHeight = Math.max(dp(MIN_PIP_DP), (int)(newWidth * 1.68f));
-            lp.width = Math.min(dp(MAX_PIP_DP), newWidth); lp.height = newHeight; pipContainer.setLayoutParams(lp); syncPipGeometry();
-        });
+    }
+
+    private final class ResizeTouchListener implements View.OnTouchListener {
+        float downX; int startWidth;
+        @Override public boolean onTouch(View v, MotionEvent event) {
+            if (recording != null || stopping) return true;
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) { downX = event.getRawX(); startWidth = pipContainer.getWidth(); return true; }
+            if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                int newWidth = (int) clampFloat(startWidth + event.getRawX() - downX, dp(MIN_PIP_DP), dp(MAX_PIP_DP));
+                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) pipContainer.getLayoutParams();
+                lp.width = newWidth; lp.height = Math.max(dp(MIN_PIP_DP), (int)(newWidth * 1.68f)); pipContainer.setLayoutParams(lp); syncPipGeometry(); return true;
+            }
+            return true;
+        }
     }
 
     private void syncPipGeometry() {
         if (pipContainer == null || pipContainer.getParent() == null) return;
-        View parent = (View) pipContainer.getParent();
-        if (parent.getWidth() <= 0 || parent.getHeight() <= 0) return;
+        View parent = (View) pipContainer.getParent(); if (parent.getWidth() <= 0 || parent.getHeight() <= 0) return;
         pipLeftFraction = clampFloat(pipContainer.getX() / parent.getWidth(), 0f, 0.84f);
         pipTopFraction = clampFloat(pipContainer.getY() / parent.getHeight(), 0f, 0.84f);
         pipWidthFraction = clampFloat((float)pipContainer.getWidth() / parent.getWidth(), 0.16f, 0.55f);
     }
 
-    private String formatFraction(float value) { return String.format(java.util.Locale.US, "%.5f", value); }
-    private String formatVolume(float value) { return String.format(java.util.Locale.US, "%.3f", Math.max(0f, Math.min(1f, value))); }
+    private String fraction(float value) { return String.format(Locale.US, "%.5f", value); }
+    private String volume(float value) { return String.format(Locale.US, "%.3f", Math.max(0f, Math.min(1f, value))); }
     private String quote(String path) { return "\"" + path.replace("\\", "\\\\").replace("\"", "\\\"") + "\""; }
-    private int clamp(int value, int min, int max) { return Math.max(min, Math.min(max, value)); }
     private float clampFloat(float value, float min, float max) { return Math.max(min, Math.min(max, value)); }
-    private int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + .5f); }
+    private int dp(int value) { return (int)(value * getResources().getDisplayMetrics().density + .5f); }
+    private void cleanup(File... files) { for (File file : files) if (file != null) file.delete(); }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
